@@ -55,6 +55,37 @@ ue-graph-capture --help
 ue-graph-capture --version
 ```
 
+The wheel includes the `UEGraphCapture` plugin source, so a normal installation does not
+require a Git checkout of this repository:
+
+```bash
+python -m pip install ue-graph-capture
+ue-graph-capture setup --project /path/to/MyGame.uproject
+```
+
+To build and test the wheel locally:
+
+```bash
+python -m build
+python -m venv .venv-wheel
+```
+
+On Windows PowerShell:
+
+```powershell
+.venv-wheel\Scripts\python.exe -m pip install dist\ue_graph_capture-0.1.0-py3-none-any.whl
+.venv-wheel\Scripts\ue-graph-capture.exe --help
+.venv-wheel\Scripts\ue-graph-capture.exe --version
+```
+
+On macOS or Linux:
+
+```bash
+.venv-wheel/bin/python -m pip install dist/ue_graph_capture-0.1.0-py3-none-any.whl
+.venv-wheel/bin/ue-graph-capture --help
+.venv-wheel/bin/ue-graph-capture --version
+```
+
 The canonical test command is:
 
 ```bash
@@ -84,8 +115,8 @@ ue-graph-capture setup --project /path/to/MyGame.uproject --dry-run --json
 
 Setup changes only the selected project's `Plugins/` directory and `.uproject` plugin enablement:
 
-1. Copies the editor-only `UEGraphCapture` plugin from this repository.
-2. Downloads GraphPrinter at the pinned revision into the user cache, builds its plugin with Unreal's `RunUAT BuildPlugin`, and copies the packaged plugin directory.
+1. Copies the editor-only `UEGraphCapture` plugin from the installed Python package resource.
+2. Downloads GraphPrinter at the pinned revision into the user cache, verifies a clean pinned tree, builds its plugin with Unreal's `RunUAT BuildPlugin`, preserves the upstream root `LICENSE`, and copies the packaged plugin directory with that license.
 3. Adds or enables `UEGraphCapture` and `GraphPrinter` in the `.uproject` `Plugins` array while preserving other plugin entries and fields.
 4. Compiles `UEGraphCapture` for the project's Unreal Editor target with UnrealBuildTool so the editor can load the plugin.
 
@@ -109,7 +140,9 @@ Useful controls:
 ue-graph-capture capture --project MyGame.uproject --asset /Game/Blueprints/BP_Player --graph EventGraph --scale 1.0 --padding 100 --timeout 300 --json
 ```
 
-After GraphPrinter writes the staged PNG, Python validates that it exists, is a valid PNG, has positive dimensions, is not blank/single-color, and has a reasonable file size. Only then is it atomically published to the requested output path. The JSON result contains the project, asset, graph, graph type, output, dimensions, file size, SHA-256, UE version, GraphPrinter version/revision, and duration.
+`--output` must use a `.png` suffix (case-insensitive). It must not be the `.uproject` file itself or be inside the project's `Content/`, `Config/`, or `Plugins/` trees; these checks fail before Unreal Editor starts. An external path such as `./captures/BP_Player.png` is allowed.
+
+After GraphPrinter writes the staged PNG, Python validates that it exists, is a valid PNG, has positive dimensions, is not blank/single-color, and has a reasonable file size. Python revalidates output safety immediately before publishing, atomically publishes the PNG, then snapshots the source-facing project files again and fails if capture changed them. The JSON result contains the project, asset, graph, graph type, output, dimensions, file size, SHA-256, UE version, GraphPrinter version/revision, and duration.
 
 Capture does not compile or save the Blueprint. It snapshots `.uproject`, `Config`, and the requested Content asset before and after the one-shot editor run and fails if any of those source-facing files change.
 
@@ -160,7 +193,7 @@ python -m ruff check .
 python -m pytest -q
 ```
 
-The GitHub Actions unit matrix covers Windows, macOS, and Linux with Python 3.10, 3.12, and 3.14. Unreal Engine is not installed in CI; the Windows real-editor smoke is a local verification step for this workstation. macOS and Linux UE integration verification remains pending.
+The GitHub Actions unit matrix covers Windows, macOS, and Linux with Python 3.10, 3.12, and 3.14. A dedicated Ubuntu wheel job builds and installs a clean wheel, verifies the installed CLI, and checks the bundled plugin resource. Unreal Engine is not installed in CI; the Windows real-editor smoke is a local verification step for this workstation. macOS and Linux UE integration verification remains pending.
 
 ## License
 

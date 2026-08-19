@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +8,8 @@ version = "0.1.0"
 description = "Cross-platform CLI for capturing complete Unreal Engine Blueprint graphs"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "metyatech" }]
 dependencies = [
   "Pillow>=10.0",
@@ -16,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "build>=1.2,<2.0",
   "pytest>=8.0,<9.0",
   "ruff>=0.6,<1.0",
 ]
@@ -25,6 +27,15 @@ ue-graph-capture = "ue_graph_capture.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+ue_graph_capture = [
+  "bundled/UEGraphCapture/*.json",
+  "bundled/UEGraphCapture/*.uplugin",
+  "bundled/UEGraphCapture/Source/**/*.Build.cs",
+  "bundled/UEGraphCapture/Source/**/*.cpp",
+  "bundled/UEGraphCapture/Source/**/*.h",
+]
 
 [tool.pytest.ini_options]
 addopts = "-ra"

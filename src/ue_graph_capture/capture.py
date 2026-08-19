@@ -17,6 +17,7 @@ from .validation import (
     safe_output_filename,
     validate_asset_path,
     validate_graph_name,
+    validate_output_path,
     validate_png,
 )
 
@@ -113,12 +114,11 @@ def capture_graph(
 ) -> dict[str, Any]:
     asset = validate_asset_path(asset)
     graph = validate_graph_name(graph)
-    _assert_plugins_installed(project)
-    final_output = (
-        Path(output).expanduser().resolve()
-        if output is not None
-        else Path.cwd() / safe_output_filename(asset, graph)
+    final_output = validate_output_path(
+        project,
+        Path(output) if output is not None else Path.cwd() / safe_output_filename(asset, graph),
     )
+    _assert_plugins_installed(project)
     before = snapshot_project(project, asset)
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="ue-graph-capture-") as temporary_root:
@@ -142,15 +142,16 @@ def capture_graph(
             editor=editor,
             timeout=timeout,
         )
+        staged_png = _single_staged_png(staged_output, result)
+        validate_png(staged_png)
+        final_output = validate_output_path(project, final_output)
+        published = _publish_png(staged_png, final_output)
         after = snapshot_project(project, asset)
         if before != after:
             raise CaptureError(
                 "Capture changed a source-facing project file "
                 "(.uproject, Config, or target Content asset)."
             )
-        staged_png = _single_staged_png(staged_output, result)
-        validate_png(staged_png)
-        published = _publish_png(staged_png, final_output)
 
     published_image = validate_png(published)
     duration_ms = round((time.monotonic() - started) * 1000)

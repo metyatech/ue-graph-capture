@@ -36,6 +36,34 @@ def safe_output_filename(asset: str, graph: str) -> str:
     return f"{safe_asset}_{safe_graph}.png"
 
 
+def validate_output_path(project: Path, output: Path) -> Path:
+    """Validate and resolve a capture destination without touching the filesystem."""
+
+    project = project.expanduser().resolve(strict=False)
+    output = output.expanduser().resolve(strict=False)
+    if output == project:
+        raise CaptureError(f"Capture output must not overwrite the project descriptor: {output}")
+    if output.suffix.lower() != ".png":
+        raise CaptureError(f"Capture output must use the .png extension: {output}")
+
+    def is_within(directory: Path) -> bool:
+        try:
+            output.relative_to(directory)
+        except ValueError:
+            return False
+        return True
+
+    protected_directories = tuple(
+        project.parent / name for name in ("Content", "Config", "Plugins")
+    )
+    if any(is_within(directory.resolve(strict=False)) for directory in protected_directories):
+        raise CaptureError(
+            "Capture output must be outside the project's Content, Config, and Plugins trees: "
+            f"{output}"
+        )
+    return output
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:

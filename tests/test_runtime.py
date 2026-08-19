@@ -7,17 +7,21 @@ from pathlib import Path
 import pytest
 from PIL import Image, ImageDraw
 
+from ue_graph_capture import capture as capture_module
+from ue_graph_capture.capture import capture_graph
 from ue_graph_capture.editor import resolve_unreal_editor
 from ue_graph_capture.errors import CaptureError
 from ue_graph_capture.platforms.base import candidate_editor_from_install_dirs
 from ue_graph_capture.process import run_editor_request
 from ue_graph_capture.project import snapshot_project
-from ue_graph_capture.validation import validate_png
+from ue_graph_capture.validation import validate_output_path, validate_png
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+PLUGIN_ROOT = REPO_ROOT / "src" / "ue_graph_capture" / "bundled" / "UEGraphCapture"
 
 
 def _write_project(path: Path, *, association: str = "5.7") -> Path:
+    path.mkdir(parents=True, exist_ok=True)
     project = path / "MyGame.uproject"
     project.write_text(
         '{"FileVersion": 3, "EngineAssociation": "' + association + '", "Plugins": []}\n',
@@ -107,6 +111,114 @@ def test_capture_snapshot_covers_uproject_config_and_target_asset(tmp_path: Path
     assert "Content/Blueprints/BP_Player.uasset" in relative_paths
 
 
+@pytest.mark.parametrize(
+    "relative_output",
+    [
+        "MyGame.uproject",
+        "Content/BP.png",
+        "Config/test.png",
+        "Plugins/test.png",
+    ],
+)
+def test_capture_output_rejects_project_descriptor_and_protected_trees(
+    tmp_path: Path, relative_output: str
+) -> None:
+    project = _write_project(tmp_path)
+    with pytest.raises(CaptureError, match="must not overwrite|Content, Config, and Plugins"):
+        validate_output_path(project, tmp_path / relative_output)
+
+
+def test_capture_output_requires_png_case_insensitively_and_allows_external_png(
+    tmp_path: Path,
+) -> None:
+    project = _write_project(tmp_path / "Project")
+    with pytest.raises(CaptureError, match=r"\.png extension"):
+        validate_output_path(project, tmp_path / "captures" / "BP.jpg")
+    assert (
+        validate_output_path(project, tmp_path / "captures" / "BP.PNG")
+        == (tmp_path / "captures" / "BP.PNG").resolve()
+    )
+
+
+def test_capture_output_safety_fails_before_plugin_or_editor_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _write_project(tmp_path)
+
+    def plugin_check_must_not_run(project_path: Path) -> None:
+        del project_path
+        raise AssertionError("plugin check ran before output safety validation")
+
+    monkeypatch.setattr(
+        "ue_graph_capture.capture._assert_plugins_installed", plugin_check_must_not_run
+    )
+    with pytest.raises(CaptureError, match="Content, Config, and Plugins"):
+        capture_graph(
+            project=project,
+            asset="/Game/BP_Player",
+            graph="EventGraph",
+            output=tmp_path / "Content" / "blocked.png",
+            editor=None,
+            scale=1.0,
+            padding=100,
+            timeout=10,
+        )
+
+
+def test_capture_detects_project_mutation_after_png_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _write_project(tmp_path)
+    config = tmp_path / "Config" / "DefaultEditor.ini"
+    config.parent.mkdir()
+    config.write_text("[Editor]\n", encoding="utf-8")
+    output = tmp_path / "captures" / "BP_Player.PNG"
+    events: list[str] = []
+
+    def fake_run_request(*, request, **kwargs):
+        del kwargs
+        image = Image.new("RGB", (512, 512), "white")
+        draw = ImageDraw.Draw(image)
+        for offset in range(20, 500, 20):
+            draw.rectangle((offset, 20, min(offset + 45, 500), 80), outline="black", width=3)
+            draw.line((offset, 100, min(offset + 90, 500), 480), fill="blue", width=4)
+        request.output_directory.mkdir(parents=True, exist_ok=True)
+        staged = request.output_directory / "capture.png"
+        image.save(staged)
+        config.write_text("[Editor]\nMutated=true\n", encoding="utf-8")
+        return {"ok": True, "output": str(staged)}
+
+    original_snapshot = snapshot_project
+    original_publish = capture_module._publish_png
+
+    def tracked_snapshot(project_path: Path, asset: str):
+        events.append("snapshot")
+        return original_snapshot(project_path, asset)
+
+    def tracked_publish(staged: Path, destination: Path) -> Path:
+        events.append("publish")
+        return original_publish(staged, destination)
+
+    monkeypatch.setattr("ue_graph_capture.capture._assert_plugins_installed", lambda project: None)
+    monkeypatch.setattr("ue_graph_capture.capture._run_request", fake_run_request)
+    monkeypatch.setattr("ue_graph_capture.capture.snapshot_project", tracked_snapshot)
+    monkeypatch.setattr("ue_graph_capture.capture._publish_png", tracked_publish)
+
+    with pytest.raises(CaptureError, match="source-facing project file"):
+        capture_graph(
+            project=project,
+            asset="/Game/BP_Player",
+            graph="EventGraph",
+            output=output,
+            editor=None,
+            scale=1.0,
+            padding=100,
+            timeout=10,
+        )
+    assert events == ["snapshot", "publish", "snapshot"]
+    assert output.is_file()
+
+
 def test_core_runtime_has_no_forbidden_platform_automation_or_shell_calls() -> None:
     python_source = "\n".join(
         path.read_text(encoding="utf-8") for path in (REPO_ROOT / "src").rglob("*.py")
@@ -116,7 +228,7 @@ def test_core_runtime_has_no_forbidden_platform_automation_or_shell_calls() -> N
     assert "printwindow" not in lowered
     assert "sendinput" not in lowered
     assert "shell=true" not in lowered.replace(" ", "")
-    for path in (REPO_ROOT / "unreal").rglob("*.cpp"):
+    for path in PLUGIN_ROOT.rglob("*.cpp"):
         source = path.read_text(encoding="utf-8").lower()
         assert "sendinput" not in source
         assert "printwindow" not in source
@@ -124,13 +236,7 @@ def test_core_runtime_has_no_forbidden_platform_automation_or_shell_calls() -> N
 
 def test_editor_plugin_waits_for_graph_layout_and_png_completion() -> None:
     source = (
-        REPO_ROOT
-        / "unreal"
-        / "UEGraphCapture"
-        / "Source"
-        / "UEGraphCapture"
-        / "Private"
-        / "UEGraphCaptureModule.cpp"
+        PLUGIN_ROOT / "Source" / "UEGraphCapture" / "Private" / "UEGraphCaptureModule.cpp"
     ).read_text(encoding="utf-8")
     assert "bPrintPending" in source
     assert "GetBoundsForSelectedNodes" in source

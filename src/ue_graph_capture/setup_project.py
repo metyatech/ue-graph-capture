@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import shutil
+import stat
 import subprocess
 import tempfile
 from dataclasses import dataclass
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +32,7 @@ class SetupPlan:
     ue_plugin_destination: Path
     enablement_change: bool
     graphprinter_change: bool
+    graphprinter_license_change: bool
     ue_plugin_change: bool
 
     def to_dict(self) -> dict[str, Any]:
@@ -37,6 +40,7 @@ class SetupPlan:
             "project": str(self.project),
             "changes": {
                 "graphPrinter": self.graphprinter_change,
+                "graphPrinterLicense": self.graphprinter_license_change,
                 "ueGraphCapture": self.ue_plugin_change,
                 "uprojectPluginEnablement": self.enablement_change,
             },
@@ -102,14 +106,53 @@ def _plugin_state(destination: Path, plugin_name: str) -> tuple[bool, bool]:
     return True, managed
 
 
-def _repo_root() -> Path:
-    root = Path(__file__).resolve().parents[2]
-    if not (root / "unreal" / "UEGraphCapture" / "UEGraphCapture.uplugin").is_file():
+def _normalized_repository_url(value: str) -> str:
+    return value.strip().rstrip("/").removesuffix(".git").casefold()
+
+
+def _remove_directory_safely(directory: Path) -> None:
+    if not directory.is_dir() or directory.is_symlink():
+        raise CaptureError(f"Expected a managed directory for removal: {directory}")
+    for child in (directory, *directory.rglob("*")):
+        if child.is_symlink():
+            continue
+        try:
+            child.chmod(child.stat().st_mode | stat.S_IWRITE)
+        except OSError as exc:
+            raise CaptureError(
+                f"Unable to normalize managed directory attributes: {child}"
+            ) from exc
+    shutil.rmtree(directory)
+    if directory.exists() or directory.is_symlink():
+        raise CaptureError(f"Unable to remove managed directory: {directory}")
+
+
+def _graphprinter_origin_matches(repository: Path) -> bool:
+    try:
+        origin = _run_checked(["git", "remote", "get-url", "origin"], cwd=repository)
+    except CaptureError:
+        return False
+    return _normalized_repository_url(origin.stdout) == _normalized_repository_url(GRAPHPRINTER_URL)
+
+
+def _remove_managed_graphprinter_source(cache_root: Path, repository: Path) -> None:
+    resolved_root = cache_root.resolve(strict=False)
+    resolved_repository = repository.resolve(strict=False)
+    if resolved_repository == resolved_root:
+        raise CaptureError("Refusing to remove the GraphPrinter cache root itself.")
+    try:
+        resolved_repository.relative_to(resolved_root)
+    except ValueError as exc:
         raise CaptureError(
-            "The source UEGraphCapture plugin is not available next to this installation. "
-            "Run the CLI from an editable checkout of ue-graph-capture."
-        )
-    return root
+            f"Refusing to remove a GraphPrinter cache path outside {resolved_root}: "
+            f"{resolved_repository}"
+        ) from exc
+    if repository.is_dir() and not repository.is_symlink():
+        _remove_directory_safely(repository)
+    elif repository.exists() or repository.is_symlink():
+        repository.unlink()
+    if repository.exists() or repository.is_symlink():
+        raise CaptureError(f"Unable to remove stale GraphPrinter cache: {repository}")
 
 
 def _ensure_graphprinter_source(*, allow_download: bool) -> Path:
@@ -119,7 +162,9 @@ def _ensure_graphprinter_source(*, allow_download: bool) -> Path:
     if not allow_download:
         return plugin
     cache_root.mkdir(parents=True, exist_ok=True)
-    if not (repository / ".git").is_dir():
+    if not (repository / ".git").exists():
+        if repository.exists():
+            _remove_managed_graphprinter_source(cache_root, repository)
         _run_checked(
             [
                 "git",
@@ -130,10 +175,38 @@ def _ensure_graphprinter_source(*, allow_download: bool) -> Path:
                 str(repository),
             ]
         )
+    elif not _graphprinter_origin_matches(repository):
+        _remove_managed_graphprinter_source(cache_root, repository)
+        _run_checked(
+            [
+                "git",
+                "clone",
+                "--filter=blob:none",
+                "--no-checkout",
+                GRAPHPRINTER_URL,
+                str(repository),
+            ]
+        )
+
+    if not _graphprinter_origin_matches(repository):
+        raise CaptureError(
+            "GraphPrinter cache origin does not match the expected upstream repository: "
+            f"{GRAPHPRINTER_URL}"
+        )
     _run_checked(["git", "fetch", "--depth", "1", "origin", GRAPHPRINTER_REVISION], cwd=repository)
-    _run_checked(["git", "checkout", "--detach", GRAPHPRINTER_REVISION], cwd=repository)
+    _run_checked(["git", "reset", "--hard", GRAPHPRINTER_REVISION], cwd=repository)
+    _run_checked(["git", "clean", "-fdx"], cwd=repository)
+    head = _run_checked(["git", "rev-parse", "HEAD"], cwd=repository).stdout.strip()
+    status = _run_checked(["git", "status", "--porcelain"], cwd=repository).stdout.strip()
+    if head != GRAPHPRINTER_REVISION or status:
+        raise CaptureError(
+            "GraphPrinter cache is not pinned to a clean requested revision: "
+            f"HEAD={head!r}, status={status!r}"
+        )
     if not (plugin / "GraphPrinter.uplugin").is_file():
         raise CaptureError(f"Pinned GraphPrinter revision has no plugin package: {plugin}")
+    if not (repository / "LICENSE").is_file():
+        raise CaptureError(f"Pinned GraphPrinter revision has no root LICENSE: {repository}")
     return plugin
 
 
@@ -147,13 +220,57 @@ def _find_plugin_directory(root: Path, plugin_name: str) -> Path:
     return matches[0].parent
 
 
+def _bundled_ue_plugin_resource() -> Any:
+    resource = resources.files("ue_graph_capture").joinpath("bundled", UE_PLUGIN_NAME)
+    if not resource.is_dir():
+        raise CaptureError(
+            "The bundled UEGraphCapture plugin resource is missing from the package."
+        )
+    return resource
+
+
+def _copy_resource_tree(source: Any, destination: Path) -> None:
+    if source.is_dir():
+        destination.mkdir(parents=True, exist_ok=True)
+        for child in source.iterdir():
+            _copy_resource_tree(child, destination / child.name)
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with source.open("rb") as input_stream, destination.open("wb") as output_stream:
+            shutil.copyfileobj(input_stream, output_stream)
+    except OSError as exc:
+        raise CaptureError(
+            f"Unable to copy bundled UEGraphCapture resource {source}: {exc}"
+        ) from exc
+
+
+def _install_bundled_ue_plugin(destination: Path) -> bool:
+    stage_root = Path(tempfile.mkdtemp(prefix="ue-graph-capture-bundled-plugin-"))
+    staged = stage_root / UE_PLUGIN_NAME
+    try:
+        _copy_resource_tree(_bundled_ue_plugin_resource(), staged)
+        return _install_plugin(
+            staged,
+            destination,
+            UE_PLUGIN_NAME,
+            {"version": UE_PLUGIN_VERSION, "source": "ue-graph-capture"},
+        )
+    finally:
+        shutil.rmtree(stage_root, ignore_errors=True)
+
+
 def _ensure_graphprinter_package(source: Path, editor: Path) -> Path:
     package_cache = graphprinter_cache_root() / f"package-{GRAPHPRINTER_REVISION}"
     cached_plugin = package_cache / "GraphPrinter.uplugin"
     cached_marker = package_cache / PLUGIN_MARKER
-    if cached_plugin.is_file() and cached_marker.is_file():
+    cached_license = package_cache / "LICENSE"
+    if cached_plugin.is_file() and cached_marker.is_file() and cached_license.is_file():
         return package_cache
 
+    source_license = source.parent.parent / "LICENSE"
+    if not source_license.is_file():
+        raise CaptureError(f"GraphPrinter source LICENSE was not found: {source_license}")
     uat = current_adapter().run_uat_from_editor(editor)
     if not uat.is_file():
         raise CaptureError(f"Unreal AutomationTool was not found: {uat}")
@@ -177,6 +294,7 @@ def _ensure_graphprinter_package(source: Path, editor: Path) -> Path:
         if package_cache.exists():
             shutil.rmtree(package_cache)
         shutil.copytree(packaged_plugin, package_cache)
+        shutil.copy2(source_license, package_cache / "LICENSE")
         write_json_atomic(
             package_cache / PLUGIN_MARKER,
             {
@@ -189,6 +307,20 @@ def _ensure_graphprinter_package(source: Path, editor: Path) -> Path:
         return package_cache
     finally:
         shutil.rmtree(build_root, ignore_errors=True)
+
+
+def _copy_graphprinter_license(package: Path, destination: Path) -> None:
+    source = package / "LICENSE"
+    if not source.is_file():
+        raise CaptureError(f"GraphPrinter package LICENSE was not found: {source}")
+    target = destination / "LICENSE"
+    temporary = target.with_name(f".{target.name}.tmp")
+    try:
+        shutil.copy2(source, temporary)
+        temporary.replace(target)
+    except OSError as exc:
+        temporary.unlink(missing_ok=True)
+        raise CaptureError(f"Unable to install GraphPrinter LICENSE at {target}: {exc}") from exc
 
 
 def _stage_plugin(source: Path, destination: Path, marker: dict[str, Any]) -> None:
@@ -288,6 +420,11 @@ def build_setup_plan(project: Path) -> SetupPlan:
         ue_plugin_destination=ue_destination,
         enablement_change=enablement_change,
         graphprinter_change=not (graphprinter_exists and graphprinter_managed),
+        graphprinter_license_change=(
+            graphprinter_exists
+            and graphprinter_managed
+            and not (graphprinter_destination / "LICENSE").is_file()
+        ),
         ue_plugin_change=not (ue_exists and ue_managed),
     )
 
@@ -302,14 +439,21 @@ def setup_project(
     created: list[Path] = []
     original_uproject = project.read_bytes()
     needs_ue_build = plan.ue_plugin_change or _ue_plugin_needs_build(plan.ue_plugin_destination)
+    graphprinter_license_path = plan.graphprinter_destination / "LICENSE"
+    original_graphprinter_license = (
+        graphprinter_license_path.read_bytes()
+        if plan.graphprinter_license_change and graphprinter_license_path.is_file()
+        else None
+    )
     editor_path: Path | None = None
     try:
-        if plan.graphprinter_change or needs_ue_build:
+        if plan.graphprinter_change or plan.graphprinter_license_change or needs_ue_build:
             editor_path = resolve_unreal_editor(project, editor)
         graphprinter_source = (
-            _ensure_graphprinter_source(allow_download=True) if plan.graphprinter_change else None
+            _ensure_graphprinter_source(allow_download=True)
+            if plan.graphprinter_change or plan.graphprinter_license_change
+            else None
         )
-        root = _repo_root() if plan.ue_plugin_change else None
         if plan.graphprinter_change:
             assert graphprinter_source is not None
             assert editor_path is not None
@@ -325,15 +469,14 @@ def setup_project(
                 },
             )
             created.append(plan.graphprinter_destination)
+        elif plan.graphprinter_license_change:
+            assert graphprinter_source is not None
+            assert editor_path is not None
+            graphprinter_package = _ensure_graphprinter_package(graphprinter_source, editor_path)
+            _copy_graphprinter_license(graphprinter_package, plan.graphprinter_destination)
         if plan.ue_plugin_change:
-            assert root is not None
-            _install_plugin(
-                root / "unreal" / "UEGraphCapture",
-                plan.ue_plugin_destination,
-                UE_PLUGIN_NAME,
-                {"version": UE_PLUGIN_VERSION, "source": "ue-graph-capture"},
-            )
-            created.append(plan.ue_plugin_destination)
+            if _install_bundled_ue_plugin(plan.ue_plugin_destination):
+                created.append(plan.ue_plugin_destination)
         enable_plugins(project)
         if needs_ue_build:
             assert editor_path is not None
@@ -342,6 +485,11 @@ def setup_project(
         project.write_bytes(original_uproject)
         for path in reversed(created):
             if path.exists():
-                shutil.rmtree(path)
+                _remove_directory_safely(path)
+        if plan.graphprinter_license_change:
+            if original_graphprinter_license is None:
+                graphprinter_license_path.unlink(missing_ok=True)
+            else:
+                graphprinter_license_path.write_bytes(original_graphprinter_license)
         raise
     return plan

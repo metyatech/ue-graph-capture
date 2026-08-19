@@ -27,3 +27,24 @@ jobs:
       - run: python -m pytest -q
       - run: python -m ue_graph_capture --help
       - run: python -m ue_graph_capture --version
+
+  wheel:
+    name: Wheel build and clean install
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m build
+      - run: python -m venv "$RUNNER_TEMP/ue-graph-capture-wheel"
+      - run: "$RUNNER_TEMP/ue-graph-capture-wheel/bin/python -m pip install dist/*.whl"
+      - run: "$RUNNER_TEMP/ue-graph-capture-wheel/bin/ue-graph-capture --help"
+      - run: "$RUNNER_TEMP/ue-graph-capture-wheel/bin/ue-graph-capture --version"
+      - run: >-
+          "$RUNNER_TEMP/ue-graph-capture-wheel/bin/python" -c
+          "from importlib.resources import files; p = files('ue_graph_capture').joinpath('bundled', 'UEGraphCapture'); assert p.joinpath('UEGraphCapture.uplugin').is_file(); assert p.joinpath('Source', 'UEGraphCapture', 'Private', 'UEGraphCaptureModule.cpp').is_file(); assert p.joinpath('Source', 'UEGraphCapture', 'UEGraphCapture.Build.cs').is_file()"

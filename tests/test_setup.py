@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from ue_graph_capture.errors import CaptureError
 from ue_graph_capture.setup_project import (
     GRAPHPRINTER_REVISION,
+    _ensure_graphprinter_package,
     build_setup_plan,
     setup_project,
 )
@@ -35,6 +37,8 @@ def _plugin_source(root: Path, name: str, marker: dict[str, str]) -> Path:
     source.mkdir(parents=True)
     (source / f"{name}.uplugin").write_text("{}", encoding="utf-8")
     (source / ".ue-graph-capture-managed.json").write_text(json.dumps(marker), encoding="utf-8")
+    if name == "GraphPrinter":
+        (source / "LICENSE").write_text("GraphPrinter MIT license\n", encoding="utf-8")
     return source
 
 
@@ -44,7 +48,6 @@ def test_setup_is_idempotent_and_preserves_existing_project_plugins(
     project = _project(tmp_path)
     sources = tmp_path / "sources"
     graphprinter = _plugin_source(sources, "GraphPrinter", {"revision": GRAPHPRINTER_REVISION})
-    _plugin_source(sources, "UEGraphCapture", {"version": "0.1.0"})
     monkeypatch.setattr(
         "ue_graph_capture.setup_project._ensure_graphprinter_source",
         lambda allow_download: graphprinter,
@@ -57,7 +60,6 @@ def test_setup_is_idempotent_and_preserves_existing_project_plugins(
         "ue_graph_capture.setup_project.resolve_unreal_editor",
         lambda project, explicit: tmp_path / "UnrealEditor",
     )
-    monkeypatch.setattr("ue_graph_capture.setup_project._repo_root", lambda: sources)
 
     def fake_build(project_path: Path, editor_path: Path, plugin_path: Path) -> None:
         del project_path, editor_path
@@ -74,6 +76,9 @@ def test_setup_is_idempotent_and_preserves_existing_project_plugins(
     first = setup_project(project)
     assert first.graphprinter_change is True
     assert (project.parent / "Plugins" / "GraphPrinter" / "GraphPrinter.uplugin").is_file()
+    assert (project.parent / "Plugins" / "GraphPrinter" / "LICENSE").read_text(
+        encoding="utf-8"
+    ) == "GraphPrinter MIT license\n"
     assert (project.parent / "Plugins" / "UEGraphCapture" / "UEGraphCapture.uplugin").is_file()
     data = json.loads(project.read_text(encoding="utf-8"))
     assert data["Plugins"][0] == {"Name": "Existing", "Enabled": True, "Extra": 1}
@@ -96,3 +101,85 @@ def test_setup_refuses_to_overwrite_unmanaged_plugin(tmp_path: Path) -> None:
     (destination / "GraphPrinter.uplugin").write_text("{}", encoding="utf-8")
     with pytest.raises(CaptureError, match="unmanaged"):
         build_setup_plan(project)
+
+
+def test_graphprinter_package_copies_upstream_license(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "repo" / "Plugins" / "GraphPrinter"
+    source.mkdir(parents=True)
+    (source / "GraphPrinter.uplugin").write_text("{}", encoding="utf-8")
+    upstream_license = source.parent.parent / "LICENSE"
+    upstream_license.write_text("GraphPrinter MIT license\n", encoding="utf-8")
+    editor = tmp_path / "UnrealEditor"
+    editor.write_text("editor", encoding="utf-8")
+    uat = tmp_path / "RunUAT.bat"
+    uat.write_text("uat", encoding="utf-8")
+    cache_root = tmp_path / "cache"
+
+    class FakeAdapter:
+        def run_uat_from_editor(self, editor_path: Path) -> Path:
+            assert editor_path == editor
+            return uat
+
+    def fake_run_checked(command: list[str], *, cwd: Path | None = None):
+        del cwd
+        package_argument = next(item for item in command if item.startswith("-Package="))
+        packaged = Path(package_argument.removeprefix("-Package=")) / "GraphPrinter"
+        packaged.mkdir(parents=True)
+        (packaged / "GraphPrinter.uplugin").write_text("{}", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(
+        "ue_graph_capture.setup_project.graphprinter_cache_root", lambda: cache_root
+    )
+    monkeypatch.setattr("ue_graph_capture.setup_project.current_adapter", lambda: FakeAdapter())
+    monkeypatch.setattr("ue_graph_capture.setup_project._run_checked", fake_run_checked)
+
+    package = _ensure_graphprinter_package(source, editor)
+
+    assert (package / "LICENSE").read_text(encoding="utf-8") == upstream_license.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_setup_repairs_license_for_existing_managed_graphprinter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = _project(tmp_path)
+    plugins = project.parent / "Plugins"
+    graphprinter = plugins / "GraphPrinter"
+    graphprinter.mkdir(parents=True)
+    (graphprinter / "GraphPrinter.uplugin").write_text("{}", encoding="utf-8")
+    (graphprinter / ".ue-graph-capture-managed.json").write_text(
+        json.dumps({"revision": GRAPHPRINTER_REVISION}), encoding="utf-8"
+    )
+    ue_plugin = plugins / "UEGraphCapture"
+    (ue_plugin / "Binaries" / "Win64").mkdir(parents=True)
+    (ue_plugin / "Binaries" / "Win64" / "UEGraphCapture.dll").write_bytes(b"built")
+    (ue_plugin / "UEGraphCapture.uplugin").write_text("{}", encoding="utf-8")
+    (ue_plugin / ".ue-graph-capture-managed.json").write_text(
+        json.dumps({"version": "0.1.0", "built": True}), encoding="utf-8"
+    )
+    package = tmp_path / "graphprinter-package"
+    package.mkdir()
+    (package / "GraphPrinter.uplugin").write_text("{}", encoding="utf-8")
+    (package / "LICENSE").write_text("GraphPrinter MIT license\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "ue_graph_capture.setup_project._ensure_graphprinter_source",
+        lambda allow_download: graphprinter,
+    )
+    monkeypatch.setattr(
+        "ue_graph_capture.setup_project._ensure_graphprinter_package",
+        lambda source, editor: package,
+    )
+    monkeypatch.setattr(
+        "ue_graph_capture.setup_project.resolve_unreal_editor",
+        lambda project_path, explicit: tmp_path / "UnrealEditor",
+    )
+
+    plan = setup_project(project)
+
+    assert plan.graphprinter_change is False
+    assert plan.graphprinter_license_change is True
+    assert (graphprinter / "LICENSE").read_text(encoding="utf-8") == "GraphPrinter MIT license\n"

@@ -70,9 +70,6 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument(
         "--dry-run", action="store_true", help="Show changes without writing files."
     )
-    setup_parser.add_argument(
-        "--yes", action="store_true", help="Explicitly confirm project setup."
-    )
     _common_output_options(setup_parser)
     setup_parser.set_defaults(handler=_handle_setup)
 
