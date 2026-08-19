@@ -118,7 +118,7 @@ jobs:
           from pathlib import Path
           from tarfile import TarFile
           from zipfile import ZipFile
-          import email
+          from email.parser import BytesParser
           import sys
 
           expected_version = sys.argv[1]
@@ -126,14 +126,14 @@ jobs:
           wheel = next(publish.glob("*.whl"))
           sdist = next(publish.glob("*.tar.gz"))
 
-          def metadata_message(text: str) -> email.message.Message:
-              return email.message_from_bytes(text.encode("utf-8"))
+          def metadata_message(data: bytes):
+              return BytesParser().parsebytes(data)
 
           with ZipFile(wheel) as archive:
               metadata_path = next(
                   name for name in archive.namelist() if name.endswith(".dist-info/METADATA")
               )
-              wheel_metadata = metadata_message(archive.read(metadata_path).decode("utf-8"))
+              wheel_metadata = metadata_message(archive.read(metadata_path))
 
           with TarFile.open(sdist, "r:gz") as archive:
               metadata_member = next(
@@ -142,7 +142,7 @@ jobs:
               metadata_file = archive.extractfile(metadata_member)
               if metadata_file is None:
                   raise SystemExit("sdist PKG-INFO could not be read")
-              sdist_metadata = metadata_message(metadata_file.read().decode("utf-8"))
+              sdist_metadata = metadata_message(metadata_file.read())
 
           for label, metadata in (("wheel", wheel_metadata), ("sdist", sdist_metadata)):
               if metadata.get("Name") != "ue-graph-capture":
