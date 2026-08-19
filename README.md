@@ -29,11 +29,21 @@ GraphPrinter is MIT-licensed by Naotsun. See [THIRD_PARTY_NOTICES.md](THIRD_PART
 
 - Python 3.10 or newer
 - Unreal Engine 5.7 (the plugin targets the UE 5.7 editor APIs)
-- Windows, macOS, or Linux
+- Windows, macOS, or Linux; platform verification status is listed below
 - Git for the first `setup` of a project, to download GraphPrinter into the user cache
 - Pillow for PNG validation
 
 The Unreal Editor is resolved from an explicit `--unreal-editor` path first. Otherwise the CLI reads `.uproject` `EngineAssociation` and asks the platform adapter for best-effort candidates. If resolution fails, pass the editor executable explicitly.
+
+### Platform verification status
+
+| Platform | Status | Evidence |
+| --- | --- | --- |
+| Windows | Verified with Unreal Engine 5.7.4 | Local end-to-end smoke completed: setup, doctor, list-graphs, and EventGraph PNG capture |
+| macOS | Supported design; UE integration verification pending | Platform adapter and Python unit tests are covered by CI |
+| Linux | Supported design; UE integration verification pending | Platform adapter and Python unit tests are covered by CI |
+
+GraphPrinter upstream platform support is separate from this project's integration verification status. GitHub Actions runs Python-only checks and does not install Unreal Engine.
 
 ## Install locally
 
@@ -150,7 +160,7 @@ python -m ruff check .
 python -m pytest -q
 ```
 
-The GitHub Actions unit matrix covers Windows, macOS, and Linux with Python 3.10, 3.12, and 3.13. Unreal Engine is not installed in CI; the Windows real-editor smoke is a local verification step for this workstation.
+The GitHub Actions unit matrix covers Windows, macOS, and Linux with Python 3.10, 3.12, and 3.14. Unreal Engine is not installed in CI; the Windows real-editor smoke is a local verification step for this workstation. macOS and Linux UE integration verification remains pending.
 
 ## License
 
