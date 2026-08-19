@@ -1,0 +1,165 @@
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish, for example v0.1.0
+        required: true
+        type: string
+
+jobs:
+  publish:
+    name: Publish release assets to PyPI
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Resolve and verify release tag
+        id: release
+        env:
+          EVENT_TAG: ${{ github.event.release.tag_name || '' }}
+          INPUT_TAG: ${{ inputs.tag || '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${EVENT_TAG:-${INPUT_TAG:-}}"
+          if [[ -z "$tag" ]]; then
+            echo "A release tag is required for this event." >&2
+            exit 1
+          fi
+          if [[ "$tag" != v* ]]; then
+            echo "Release tag must use the v* form: $tag" >&2
+            exit 1
+          fi
+
+          version="${tag#v}"
+          if [[ -z "$version" ]]; then
+            echo "Release tag must contain a package version: $tag" >&2
+            exit 1
+          fi
+
+          git ls-remote --exit-code --refs origin "refs/tags/$tag" >/dev/null
+          git fetch --no-tags origin "refs/tags/$tag:refs/tags/$tag"
+          tag_commit="$(git rev-list -n 1 "${tag}^{commit}")"
+          if [[ -z "$tag_commit" ]]; then
+            echo "Could not resolve tag target commit: $tag" >&2
+            exit 1
+          fi
+
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "commit=$tag_commit"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify GitHub Release and download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_json="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json tagName,isDraft,isPrerelease)"
+          release_tag="$(jq -r '.tagName' <<< "$release_json")"
+          release_draft="$(jq -r '.isDraft' <<< "$release_json")"
+          release_prerelease="$(jq -r '.isPrerelease' <<< "$release_json")"
+          [[ "$release_tag" == "$TAG" ]]
+          [[ "$release_draft" == false ]]
+          [[ "$release_prerelease" == false ]]
+
+          mkdir -p publish
+          gh release download "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "ue_graph_capture-${VERSION}-py3-none-any.whl" \
+            --pattern "ue_graph_capture-${VERSION}.tar.gz" \
+            --dir publish
+
+          shopt -s nullglob
+          wheels=(publish/*.whl)
+          sdists=(publish/*.tar.gz)
+          if (( ${#wheels[@]} != 1 )); then
+            echo "Expected exactly one wheel, found ${#wheels[@]}." >&2
+            exit 1
+          fi
+          if (( ${#sdists[@]} != 1 )); then
+            echo "Expected exactly one sdist, found ${#sdists[@]}." >&2
+            exit 1
+          fi
+          [[ "$(basename "${wheels[0]}")" == "ue_graph_capture-${VERSION}-py3-none-any.whl" ]]
+          [[ "$(basename "${sdists[0]}")" == "ue_graph_capture-${VERSION}.tar.gz" ]]
+
+      - name: Verify package metadata matches the tag
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - "$VERSION" <<'PY'
+          from pathlib import Path
+          from tarfile import TarFile
+          from zipfile import ZipFile
+          import email
+          import sys
+
+          expected_version = sys.argv[1]
+          publish = Path("publish")
+          wheel = next(publish.glob("*.whl"))
+          sdist = next(publish.glob("*.tar.gz"))
+
+          def metadata_message(text: str) -> email.message.Message:
+              return email.message_from_bytes(text.encode("utf-8"))
+
+          with ZipFile(wheel) as archive:
+              metadata_path = next(
+                  name for name in archive.namelist() if name.endswith(".dist-info/METADATA")
+              )
+              wheel_metadata = metadata_message(archive.read(metadata_path).decode("utf-8"))
+
+          with TarFile.open(sdist, "r:gz") as archive:
+              metadata_member = next(
+                  member for member in archive.getmembers() if member.name.endswith("/PKG-INFO")
+              )
+              metadata_file = archive.extractfile(metadata_member)
+              if metadata_file is None:
+                  raise SystemExit("sdist PKG-INFO could not be read")
+              sdist_metadata = metadata_message(metadata_file.read().decode("utf-8"))
+
+          for label, metadata in (("wheel", wheel_metadata), ("sdist", sdist_metadata)):
+              if metadata.get("Name") != "ue-graph-capture":
+                  raise SystemExit(f"{label} package name does not match")
+              if metadata.get("Version") != expected_version:
+                  raise SystemExit(
+                      f"{label} version {metadata.get('Version')!r} does not match tag version "
+                      f"{expected_version!r}"
+                  )
+          PY
+
+      - name: Check distribution metadata
+        run: |
+          python -m pip install --disable-pip-version-check --no-input "twine>=6,<7"
+          python -m twine check publish/*.whl publish/*.tar.gz
+
+      - name: Publish package to PyPI with Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: publish/
