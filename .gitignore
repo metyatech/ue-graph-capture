@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+build/
+dist/
+
+# Local Unreal project outputs when a smoke project is placed in the repo.
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+.vs/
+
+# Local setup caches and smoke outputs.
+.ue-graph-capture/
+*.png
+*.json.tmp

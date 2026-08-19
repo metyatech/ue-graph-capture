@@ -1,0 +1,25 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "0.1.0",
+  "FriendlyName": "UE Graph Capture",
+  "Description": "One-shot, editor-only Blueprint graph capture for ue-graph-capture.",
+  "Category": "Editor",
+  "CreatedBy": "metyatech",
+  "CanContainContent": false,
+  "IsBetaVersion": true,
+  "Installed": false,
+  "Plugins": [
+    {
+      "Name": "GraphPrinter",
+      "Enabled": true
+    }
+  ],
+  "Modules": [
+    {
+      "Name": "UEGraphCapture",
+      "Type": "Editor",
+      "LoadingPhase": "PostEngineInit"
+    }
+  ]
+}

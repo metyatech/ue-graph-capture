@@ -1,0 +1,13 @@
+{
+  // Rules sources. Each entry is github:owner/repo@ref or a local path.
+  "sources": ["github:metyatech/agent-rules@HEAD"],
+  // Profile name defined by a source's agent-profiles.json.
+  "profile": "ghws-workspace",
+  // Claude Code companion output settings.
+  "claude": {
+    "enabled": true,
+    "output": "CLAUDE.md"
+  },
+  // Output file name.
+  "output": "AGENTS.md"
+}
